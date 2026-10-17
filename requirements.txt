@@ -1,0 +1,28 @@
+# Orchestration & Frameworks
+typesafe-sdk
+langgraph
+langchain
+langchain-google-genai
+
+# Ingestion & EPUB Parsing
+ebooklib
+beautifulsoup4
+lxml
+playwright
+
+# Storage & Memory
+chromadb
+psycopg2-binary
+
+# Audio Generation
+podcastfy
+
+# Asynchronous Task Queue
+celery
+redis
+
+# Utilities & Configuration
+python-dotenv
+pydantic
+
+#winget install Gyan.FFmpeg
