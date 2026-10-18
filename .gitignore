@@ -1,4 +1,29 @@
+# Virtual Environments
 .venv/
+venv/
+ENV/
+
+# Python Cache & Bytecode
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Secret Environment Files (NEVER COMMIT)
 .env
+.env.*
+!.env.example
+
+# Local Data Storage & Generated Audio
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+*.mp3
+*.wav
+
+# System & Editor Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
