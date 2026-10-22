@@ -3,6 +3,7 @@ typesafe-sdk
 langgraph
 langchain
 langchain-google-genai
+#google-generativeai
 
 # Ingestion & EPUB Parsing
 ebooklib
@@ -26,3 +27,4 @@ python-dotenv
 pydantic
 
 #winget install Gyan.FFmpeg
+#pytest pytest-asyncio
