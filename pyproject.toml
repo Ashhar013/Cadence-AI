@@ -5,7 +5,31 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cadence"
 version = "0.1.0"
-dependencies = []
+dependencies = [
+    "aiosqlite",
+    "beautifulsoup4",
+    "chromadb",
+    "ebooklib",
+    "google-genai",
+    "langchain",
+    "langchain-google-genai",
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "lxml",
+    "playwright",
+    "pydantic",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::bs4.XMLParsedAsHTMLWarning",
+    "ignore::UserWarning:ebooklib",
+    "ignore::FutureWarning:ebooklib",
+]

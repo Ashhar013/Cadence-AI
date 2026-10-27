@@ -1,11 +1,11 @@
 import asyncio
-from multiprocessing import context
-from src.cadence.ingestion.scraper import ShadowLibraryScrapper
+from cadence.ingestion.scraper import ShadowLibraryScrapper
 from playwright.async_api import async_playwright
+from typing import List, Dict
 
-async def run_scraper_test():
+async def get_books_details(query: str) -> List[Dict[str, str]]:
+    """Core scraping logic that will be called by our LangGraph tool."""
     scrapper = ShadowLibraryScrapper(download_dir="data/raw", headless=False)
-    query = "Designing Data-Intensive Applications"
 
     print(f"Searching for book : '{query}'")
     
@@ -25,18 +25,12 @@ async def run_scraper_test():
 
         # Search for books
         results = await scrapper.search_books(query, page)
-        
-        print("\nSearch Results:")
-        for idx, item in enumerate(results, start=1):
-            print(f"{idx}. {item['title']} - {item['meta']}")
-
-        # Download the first ePub found
-        if results:
-            first_book_link = results[0]["link"]
-            epub_path = await scrapper.download_epub(first_book_link, page)
-            print(f"\nDownloaded ePub to: {epub_path}")
-
         await browser.close()
+        return results
+
 
 if __name__ == "__main__":
-    asyncio.run(run_scraper_test())
+    asyncio.run(get_books_details("test"))
+
+
+

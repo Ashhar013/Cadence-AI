@@ -1,5 +1,6 @@
 # Virtual Environments
 .venv/
+.venv*/
 venv/
 ENV/
 
@@ -15,9 +16,9 @@ __pycache__/
 !.env.example
 
 # Local Data Storage & Generated Audio
-data/raw/*
-data/processed/*
+data/raw/**/*
 !data/raw/.gitkeep
+data/processed/**/*
 !data/processed/.gitkeep
 *.mp3
 *.wav
@@ -29,3 +30,4 @@ data/processed/*
 Thumbs.db
 
 test.py
+.pytest-tmp*/

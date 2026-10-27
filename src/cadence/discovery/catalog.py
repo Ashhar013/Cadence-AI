@@ -1,14 +1,15 @@
 import httpx
-from typing import List, Union
+from typing import List
 import asyncio
-from functools import partial
 from cadence.discovery.models import BookCandidate, BookMetadata
 
-async def search_books(query: str) -> Union[List[BookCandidate], str]:
+async def search_books(query: str) -> List[BookCandidate]:
+    """Quick title-only search against Open Library."""
     url = "https://openlibrary.org/search.json"
-    params = {"title": query}
+    params = {"title": query, "limit": 5}
     async with httpx.AsyncClient() as client:
         response = await client.get(url, params=params)
+        response.raise_for_status()
         return response.json()
 
 async def get_book_details(search_query: str) -> List[BookCandidate]:
@@ -20,52 +21,52 @@ async def get_book_details(search_query: str) -> List[BookCandidate]:
     params = {"q": search_query, "fields": fields, "limit": 5}
 
     # 2. Add an identified User-Agent for better rate-limiting stability
-    headers = {"User-Agent": "BookFinderApp/1.0 (your-email@example.com)"}
+    headers = {"User-Agent": "CadenceAI/0.1.0 (cadence-book-assistant)"}
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, headers=headers)
-            response.raise_for_status()  # Check for HTTP request errors
+            response.raise_for_status()
 
             data = response.json()
 
-        candidates = []
-
         # Check if any books matched the query
         if not data.get("docs"):
-            return "No books found matching that query."
+            return []
 
-        book = data["docs"][0]
+        candidates = []
 
-        # 3. Clean and parse the payload
-        title = book.get("title", "Unknown Title")
+        # 3. Iterate over ALL returned docs (up to limit=5), not just the first
+        for book in data["docs"]:
+            title = book.get("title", "Unknown Title")
 
-        # Authors are returned as a list, join them with commas
-        authors_list = book.get("author_name", [])
-        #authors = ", ".join(authors_list) if authors_list else "Unknown Author"
+            # Authors are returned as a list — keep them as a list
+            authors_list = book.get("author_name", [])
 
-        # Construct the web link using the unique work path (e.g., /works/OL27479W)
-        web_link = f"https://openlibrary.org/search.json{book.get('key', '')}"
+            # Construct the web link using the unique work path (e.g., /works/OL27479W)
+            web_link = f"https://openlibrary.org{book.get('key', '')}"
 
-        # Consolidate desired metadata into a clean dictionary
-        metadata = BookMetadata(
-            first_publish_year=book.get("first_publish_year", None),
-            total_editions_cataloged=book.get("edition_count", 0),
-            top_subjects=book.get("subject", [])[:5],
-            link=web_link
-        )
+            # Consolidate desired metadata into a clean dictionary
+            metadata = BookMetadata(
+                first_publish_year=book.get("first_publish_year", None),
+                total_editions_cataloged=book.get("edition_count", 0),
+                top_subjects=book.get("subject", [])[:5],
+                link=web_link
+            )
 
-        candidate = BookCandidate(
-            title=title,
-            authors= ", ".join(authors_list) if authors_list else [],
-            meta=metadata
-        )
-        candidates.append(candidate)
+            candidate = BookCandidate(
+                title=title,
+                authors=authors_list,
+                meta=metadata
+            )
+            candidates.append(candidate)
 
         return candidates
 
     except httpx.HTTPStatusError as e:
-        return f"An HTTP error occurred during the API call: {e}"
+        print(f"[ERROR] HTTP error during Open Library API call: {e}")
+        return []
     except httpx.RequestError as e:
-        return f"A network error occurred during the API call: {e}"
+        print(f"[ERROR] Network error during Open Library API call: {e}")
+        return []
 

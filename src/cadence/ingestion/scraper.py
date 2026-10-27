@@ -20,7 +20,10 @@ class ShadowLibraryScrapper:
         """
         Search for books and extract metadata for top ePubs.
         """
-        search_url = f"https://annas-archive.gl/search?q={query.replace(' ', '+')}&check=1"
+        search_url = (
+        "https://annas-archive.gl/search"
+        f"?index=&page=1&sort=&ext=epub&display=&q={query}&check=1"
+    )
         
         # 1. Navigate to search URL
         await page.goto(search_url, wait_until="domcontentloaded")
@@ -61,25 +64,31 @@ class ShadowLibraryScrapper:
             await page.wait_for_selector("a[href^='/md5/']", timeout=10000)       
 
         results = []
+        print("[DEBUG] URL after CAPTCHA:", page.url)
+        print("[DEBUG] Title after CAPTCHA:", await page.title())
         cards = await page.query_selector_all("a[href^='/md5/']")
+        print("[DEBUG] Cards found:", len(cards))
 
         for card in cards:
             full_card_text = await card.inner_text()
             href = await card.get_attribute("href")
 
-            if href and "epub" in full_card_text.lower():
-                title_el = await card.query_selector("h3")
-                title = await title_el.inner_text() if title_el else full_card_text.split('\n')[0]  # Fallback to first line of card text if title not found
+            print(f"href: {href}")
+            print(f"contains epub: {'epub' in full_card_text.lower()}")
+            print(f"text preview: {full_card_text[:150]!r}")
 
-                full_link = f"https://annas-archive.gl{href}" if href.startswith("/") else href
-                results.append({
-                    "title": title.strip(),
-                    "meta": full_card_text.replace('\n', ' ').strip()[:100],
-                    "link": full_link
-                })
+            title_el = await card.query_selector("h3")
+            title = await title_el.inner_text() if title_el else full_card_text.split('\n')[0]  # Fallback to first line of card text if title not found
 
-                if len(results) >= 5:  # Limit to top 5 results
-                    break
+            full_link = f"https://annas-archive.gl{href}" if href.startswith("/") else href
+            results.append({
+                "title": title.strip(),
+                "meta": full_card_text.replace('\n', ' ').strip()[:100],
+                "link": full_link
+            })
+
+            if len(results) >= 10:  # Limit to top 5 results
+                break
 
         return results
 
@@ -92,7 +101,7 @@ class ShadowLibraryScrapper:
         await asyncio.sleep(2)  # Allow time for the page to load
 
         # Locate and click the initial slow/fast partner download option
-        partner_download_link = await page.query_selector("a[href*='/slow_download/'], a:has-text('Slow partner download')")
+        partner_download_link = await page.query_selector("a[href*='/slow_download/'], a:has-text('Slow Partner Server')")
 
         if partner_download_link:
             print("[*] Clicking on the partner download link...")
@@ -128,7 +137,7 @@ class ShadowLibraryScrapper:
                 raise TimeoutError("CAPTCHA manual solving timed out after 120s.")
 
         #Final candidate download links
-        download_links = page.locator("a:has-text('Download now'), a:has-text('Click here to download'), a[href$='.epub'], a[href*='download']")
+        download_links = page.locator("a:has-text('Download now'), a:has-text('Slow Partner Download'), a[href$='.epub'], a[href*='download']")
 
         count = await download_links.count()
         if count == 0:

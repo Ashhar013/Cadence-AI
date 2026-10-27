@@ -1,0 +1,17 @@
+aiosqlite
+beautifulsoup4
+chromadb
+ebooklib
+google-genai
+langchain
+langchain-google-genai
+langgraph
+langgraph-checkpoint-sqlite
+lxml
+playwright
+pydantic
+python-dotenv
+
+[dev]
+pytest
+pytest-asyncio

@@ -1,3 +1,19 @@
 Metadata-Version: 2.4
 Name: cadence
 Version: 0.1.0
+Requires-Dist: aiosqlite
+Requires-Dist: beautifulsoup4
+Requires-Dist: chromadb
+Requires-Dist: ebooklib
+Requires-Dist: google-genai
+Requires-Dist: langchain
+Requires-Dist: langchain-google-genai
+Requires-Dist: langgraph
+Requires-Dist: langgraph-checkpoint-sqlite
+Requires-Dist: lxml
+Requires-Dist: playwright
+Requires-Dist: pydantic
+Requires-Dist: python-dotenv
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-asyncio; extra == "dev"

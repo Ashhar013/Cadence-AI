@@ -1,8 +1,10 @@
 # Orchestration & Frameworks
 typesafe-sdk
 langgraph
+langgraph-checkpoint-sqlite
 langchain
 langchain-google-genai
+google-genai
 #google-generativeai
 
 # Ingestion & EPUB Parsing
@@ -14,6 +16,7 @@ playwright
 # Storage & Memory
 chromadb
 psycopg2-binary
+aiosqlite
 
 # Audio Generation
 podcastfy
@@ -25,6 +28,8 @@ redis
 # Utilities & Configuration
 python-dotenv
 pydantic
+pytest
+pytest-asyncio
 
 #winget install Gyan.FFmpeg
 #pytest pytest-asyncio
