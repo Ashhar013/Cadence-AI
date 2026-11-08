@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, interrupt
 
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -24,7 +25,8 @@ from cadence.memory.vector_store import get_chroma_client, get_or_create_collect
 from cadence.memory.embedder import aupsert_chunks
 from cadence.memory.library import get_library
 from cadence.memory.context import should_summarize, split_messages_for_summary, summarize_conversation
-from cadence.agents.rag_agent import aanswer_question
+from cadence.agents.rag_agent import aanswer_question, rewrite_retrieval_query
+from cadence.utils.config import DATA_RAW_DIR
 
 load_dotenv()
 
@@ -91,6 +93,54 @@ query_prompt = ChatPromptTemplate.from_messages([
 intent_llm = llm.with_structured_output(IntentClassification)
 structured_llm = query_prompt | llm.with_structured_output(BookSearchQuery)
 
+def find_local_epub(title: str) -> Optional[Path]:
+    """Find an EPUB in DATA_RAW_DIR whose filename matches the book title."""
+    if not title or not DATA_RAW_DIR.exists():
+        return None
+
+    def normalize(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+    target = normalize(title)
+
+    for epub_path in DATA_RAW_DIR.glob("*.epub"):
+        filename = normalize(epub_path.stem)
+
+        if target in filename or filename in target:
+            return epub_path
+
+    return None
+
+async def index_local_epub(epub_path: Path, title: str) -> dict:
+    """Ingest, embed, and register a local EPUB using existing nodes."""
+
+    state = {
+        "epub_path": str(epub_path),
+        "selected_book": {
+            "title": title,
+            "authors": [],
+        },
+        "chapters": [],
+        "chunks": [],
+        "collection_name": None,
+        "error": None,
+    }
+
+    ingestion_result = await ingestion_node(state)
+    state.update(ingestion_result)
+
+    if state.get("error") or not state.get("chunks"):
+        raise RuntimeError(
+            state.get("error") or "No chunks were extracted from the EPUB."
+        )
+
+    embedding_result = await embedding_node(state)
+    state.update(embedding_result)
+
+    if state.get("error"):
+        raise RuntimeError(state["error"])
+
+    return state
 
 # ─── Node: chat_node (Intent Classification Only) ───────────────────────────
 
@@ -117,16 +167,30 @@ def chat_node(state: State) -> dict:
     start = time.perf_counter()
     classification = intent_llm.invoke([
         SystemMessage(
-            content=(
-                "Classify the latest user message. "
-                "'book_search' means the user wants to find, search for, or download a book. "
-                "'book_chat' means the user is asking a question about a book, its concepts, chapters, or contents. "
-                "'conversation' means greetings, general chit-chat, or any other query. "
-                "Classify the latest message, not an earlier request."
-            )
-        ),
+        content=(
+            "Classify the latest user message into exactly one category. "
+
+            "'book_search': The user wants to find, search for, "
+            "or download a new book from external catalogues. "
+
+            "'book_chat': The user wants to discuss a book, ask questions "
+            "about a book, OR list/check books in their local library, "
+            "data/raw folder, or indexed collection. "
+
+            "'conversation': Greetings, general chit-chat, "
+            "or unrelated queries. "
+
+            "IMPORTANT: Requests like 'What books do I have?', "
+            "'Show my library', and 'What books are available locally?' "
+            "must be classified as 'book_chat', NOT 'book_search'."
+
+            "Classify only the latest user message."
+        )
+    ),
         latest_user_message,
     ])
+    print(f"[DEBUG] Classified intent: {classification.intent}")
+    print(f"[DEBUG] Active book: {state.get('selected_book')}")
     print(f"[PERF] Intent classification: {round(time.perf_counter() - start, 2)}s")
 
     return {
@@ -428,11 +492,28 @@ async def embedding_node(state: State) -> dict:
 
     title = state.get("selected_book", {}).get("title", "book")
     client = get_chroma_client()
-    collection = get_or_create_collection(client, collection_name=title)
+    collection = get_or_create_collection(
+        client,
+        collection_name=f"bge_{title}"
+    )
 
     try:
-        count = await aupsert_chunks(collection, chunks=chunks, book_title=title)
-        print(f"[INFO] Embedded {count} chunks into Chroma collection '{collection.name}'")
+        existing_count = collection.count()
+
+        if existing_count == 0:
+            count = await aupsert_chunks(
+                collection,
+                chunks=chunks,
+                book_title=title
+            )
+            print(f"[INFO] Embedded {count} chunks into '{collection.name}'")
+
+        else:
+            count = existing_count
+            print(
+                f"[INFO] Found {existing_count} existing chunks. "
+                "Skipping embedding."
+            )
 
         # Register book in the user's permanent local library
         lib = get_library()
@@ -449,6 +530,7 @@ async def embedding_node(state: State) -> dict:
             "collection_name": collection.name,
             "processing_status": f"embedding_complete:{count}_chunks",
         }
+    
     except Exception as e:
         print(f"[ERROR] Embedding failed: {e}")
         return {
@@ -474,69 +556,148 @@ def route_after_embedding(state: State) -> str:
 # ─── Node: rag_node (Answer Questions from Book Context) ────────────────────
 
 async def rag_node(state: State) -> dict:
-    """Answer questions about books using grounded RAG retrieval or library queries."""
-    raw_query = state.get("raw_query", "")
+    """Answer book questions using the correct book's ChromaDB collection."""
+
+    raw_query = state.get("raw_query", "").strip()
+    print("\n[DEBUG] Recent conversation history:")
+    for message in state["messages"][-6:]:
+        print(f"{message.type}: {message.content}")
     lib = get_library()
     q_lower = raw_query.lower()
 
-    # Handle library queries: "What books do I have?", "List my books", etc.
-    if any(phrase in q_lower for phrase in ["what books", "list my books", "show my books", "my library", "all books"]):
+    # 1. Handle library queries
+    if any(phrase in q_lower for phrase in [
+        "what books", "list my books", "show my books",
+        "my library", "all books"
+    ]):
         books = lib.list_books()
+
         if not books:
             return {
-                "messages": [
-                    AIMessage(
-                        content=(
-                            "Your library is currently empty! "
-                            "You can search for and download books anytime (e.g., 'Find Designing Data-Intensive Applications')."
-                        )
-                    )
-                ],
+                "messages": [AIMessage(content="Your library is currently empty.")],
                 "processing_status": "library_empty",
             }
+
         book_lines = [
             f"• **{b.title}** by {', '.join(b.authors) if b.authors else 'Unknown'} "
             f"({b.chapter_count} chapters, {b.chunk_count} chunks indexed)"
             for b in books
         ]
-        message_text = "Here are the books currently in your library:\n" + "\n".join(book_lines)
+
         return {
-            "messages": [AIMessage(content=message_text)],
+            "messages": [
+                AIMessage(content="Here are your books:\n" + "\n".join(book_lines))
+            ],
             "processing_status": "library_listed",
         }
 
-    client = get_chroma_client()
-    collections = list_collections(client)
-
-    if not collections:
-        return {
-            "messages": [
-                AIMessage(
-                    content=(
-                        "I don't have any books indexed in memory yet. "
-                        "Please search for and download a book first (e.g. 'Find Designing Data-Intensive Applications')."
-                    )
-                )
-            ],
-            "processing_status": "rag_no_books",
-        }
-
-    target_col_name = state.get("collection_name")
-    if not target_col_name or target_col_name not in collections:
-        target_col_name = collections[0]
-
-    collection = client.get_collection(target_col_name)
-
     try:
-        answer = await aanswer_question(question=raw_query, collection=collection)
+        collection_name = state.get("collection_name")
+
+        # Reuse the active book's collection if available.
+        if not collection_name:
+
+            normalized_query = re.sub(
+                r"[^a-z0-9]+", " ", q_lower
+            ).strip()
+
+            book_entry = None
+
+            # Search registered library.
+            for entry in lib.list_books():
+                normalized_title = re.sub(
+                    r"[^a-z0-9]+", " ", entry.title.lower()
+                ).strip()
+
+                if normalized_title in normalized_query:
+                    book_entry = entry
+                    break
+
+            # Fall back to local EPUB lookup.
+            if book_entry is None:
+                title_query = re.sub(
+                    r"^(let'?s\s+)?chat\s+with\s*",
+                    "",
+                    raw_query,
+                    flags=re.IGNORECASE,
+                ).strip(" _-")
+
+                epub_path = find_local_epub(title_query)
+
+                if epub_path is None:
+                    return {
+                        "messages": [
+                            AIMessage(content=(
+                                f"I couldn't find **{title_query}** in your indexed "
+                                "library or data/raw. Please check the book title "
+                                "or add its EPUB file."
+                            ))
+                        ],
+                        "processing_status": "local_book_not_found",
+                    }
+
+                title = epub_path.stem.replace("_", " ").replace("-", " ")
+
+                indexed_state = await index_local_epub(epub_path, title)
+                collection_name = indexed_state["collection_name"]
+
+            else:
+                collection_name = book_entry.collection_name
+
+        # Retrieve the active book's collection.
+        client = get_chroma_client()
+        collection = client.get_collection(collection_name)
+
+        # Prepare recent conversation history for query contextualization.
+        chat_history = []
+
+        for message in state["messages"][-6:-1]:
+            content = message.content
+
+            # Gemini responses may contain structured content blocks.
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+
+            if isinstance(content, str) and content.strip():
+                role = "assistant" if message.type == "ai" else "user"
+
+                chat_history.append({
+                    "role": role,
+                    "content": content.strip(),
+                })
+
+        # Rewrite the latest question using relevant conversation context.
+        retrieval_query = rewrite_retrieval_query(
+            question=raw_query,
+            chat_history=chat_history,
+        )
+
+        print(f"[DEBUG] Original question: {raw_query}")
+        print(f"[DEBUG] Rewritten retrieval query: {retrieval_query}")
+
+        answer = await aanswer_question(
+            question=raw_query,
+            collection=collection,
+            retrieval_query=retrieval_query,
+        )
+
         return {
+            "collection_name": collection_name,
             "messages": [AIMessage(content=answer)],
             "processing_status": "rag_answered",
         }
+
     except Exception as e:
         print(f"[ERROR] RAG query failed: {e}")
+
         return {
-            "messages": [AIMessage(content=f"Sorry, I encountered an error searching the book: {e}")],
+            "messages": [
+                AIMessage(content=f"Sorry, I encountered an error: {e}")
+            ],
             "error": str(e),
             "processing_status": "rag_failed",
         }

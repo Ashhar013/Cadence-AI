@@ -51,6 +51,52 @@ def _build_toc_map(toc_items: list) -> Dict[str, str]:
     return mapping
 
 
+def _remove_embedded_toc(soup: BeautifulSoup) -> None:
+    """
+    Remove a printed Table of Contents block from an EPUB document.
+    """
+    if soup.body is None:
+        return
+
+    body_elements = soup.body.find_all(recursive=False)
+
+    # Find the exact TOC heading.
+    start_index = next(
+        (
+            i for i, element in enumerate(body_elements)
+            if element.get_text(" ", strip=True).casefold()
+            == "table of contents"
+        ),
+        None,
+    )
+
+    if start_index is None:
+        return
+
+    # Identify actual TOC page footer patterns.
+    end_indices = []
+
+    for i in range(start_index + 1, len(body_elements)):
+        text = " ".join(
+            body_elements[i].get_text(" ", strip=True).casefold().split()
+        )
+
+        if (
+            text.startswith("table of contents |")
+            or text.endswith("| table of contents")
+        ):
+            end_indices.append(i)
+
+    # Fail safely if no footer is found.
+    if not end_indices:
+        return
+
+    end_index = end_indices[-1]
+
+    # Remove the complete TOC block.
+    for element in body_elements[start_index:end_index + 1]:
+        element.decompose()
+
 def parse_epub(file_path: Union[str, Path], min_char_threshold: int = 200) -> List[Chapter]:
     """
     Extract chapters as clean text from an ePub file.
@@ -83,6 +129,7 @@ def parse_epub(file_path: Union[str, Path], min_char_threshold: int = 200) -> Li
             tag.decompose()
 
         # Clean text
+        _remove_embedded_toc(soup)
         text = soup.get_text(separator="\n", strip=True)
 
         # Filter out tiny sections (cover-only, copyright blurb, blank pages)
@@ -111,6 +158,10 @@ def parse_epub(file_path: Union[str, Path], min_char_threshold: int = 200) -> Li
         # 4. Fallback
         if not title:
             title = f"Section {len(chapters) + 1}"
+
+        # Skip EPUB-generated document outlines.
+        if title.strip().casefold() == "document outline":
+            continue
 
         chapter = Chapter(
             index=len(chapters),

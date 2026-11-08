@@ -4,49 +4,37 @@ import asyncio
 from typing import List, Union, Dict, Any
 from google import genai
 from chromadb.api.models.Collection import Collection
+from sentence_transformers import SentenceTransformer
 
 from cadence.ingestion.chunker import Chunk
 
 
+embedding_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+
 def embed_texts(
     texts: List[str],
-    model: str = "gemini-embedding-001",
     batch_size: int = 50,
 ) -> List[List[float]]:
     """
-    Generate vector embeddings for a list of strings using Google Gemini in batches.
-    
-    Args:
-        texts: List of text snippets to embed.
-        model: Google GenAI embedding model name.
-        batch_size: Maximum items per batch request.
-
-    Returns:
-        List of embedding vectors (each vector is a list of floats).
+    Generate local embeddings using BGE-small.
     """
     if not texts:
         return []
 
-    client = genai.Client()
-    all_embeddings: List[List[float]] = []
+    embeddings = embedding_model.encode(
+        texts,
+        batch_size=batch_size,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = client.models.embed_content(
-            model=model,
-            contents=batch,
-        )
-        for emb in response.embeddings:
-            all_embeddings.append(emb.values)
-
-    return all_embeddings
+    return embeddings.tolist()
 
 
 def upsert_chunks(
     collection: Collection,
     chunks: List[Union[Chunk, Dict[str, Any]]],
     book_title: str = "unknown_book",
-    model: str = "gemini-embedding-001",
     batch_size: int = 50,
 ) -> int:
     """
@@ -90,7 +78,7 @@ def upsert_chunks(
                 chars = c.get("char_count", len(text))
 
             texts.append(text)
-            ids.append(f"chunk_{chunk_idx}")
+            ids.append(f"chapter_{ch_idx}_chunk_{chunk_idx}")
             metadatas.append({
                 "book_title": book_title,
                 "chapter_index": ch_idx,
@@ -100,7 +88,7 @@ def upsert_chunks(
             })
 
         # Generate embeddings for the batch
-        embeddings = embed_texts(texts, model=model, batch_size=batch_size)
+        embeddings = embed_texts(texts, batch_size=batch_size)
 
         # Upsert into ChromaDB
         collection.upsert(
@@ -118,7 +106,6 @@ async def aupsert_chunks(
     collection: Collection,
     chunks: List[Union[Chunk, Dict[str, Any]]],
     book_title: str = "unknown_book",
-    model: str = "gemini-embedding-001",
     batch_size: int = 50,
 ) -> int:
     """Async wrapper to embed and upsert chunks without blocking the event loop."""
@@ -127,6 +114,5 @@ async def aupsert_chunks(
         collection=collection,
         chunks=chunks,
         book_title=book_title,
-        model=model,
         batch_size=batch_size,
     )

@@ -31,3 +31,9 @@ Thumbs.db
 
 test.py
 .pytest-tmp*/
+
+# Testing & Reports
+.pytest_cache/
+.pytest-tmp*/
+.coverage
+htmlcov/

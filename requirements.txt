@@ -31,5 +31,3 @@ pydantic
 pytest
 pytest-asyncio
 
-#winget install Gyan.FFmpeg
-#pytest pytest-asyncio
