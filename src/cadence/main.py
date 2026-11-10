@@ -26,7 +26,7 @@ from cadence.memory.embedder import aupsert_chunks
 from cadence.memory.library import get_library
 from cadence.memory.context import should_summarize, split_messages_for_summary, summarize_conversation
 from cadence.agents.rag_agent import aanswer_question, rewrite_retrieval_query
-from cadence.utils.config import DATA_RAW_DIR
+from cadence.utils.config import DATA_RAW_DIR, DATA_PROCESSED_DIR
 
 load_dotenv()
 
@@ -103,6 +103,10 @@ def find_local_epub(title: str) -> Optional[Path]:
 
     target = normalize(title)
 
+    print("[DEBUG] DATA_RAW_DIR:", DATA_RAW_DIR.resolve())
+    print("[DEBUG] Directory exists:", DATA_RAW_DIR.exists())
+    print("[DEBUG] EPUB files:", list(DATA_RAW_DIR.glob("*")))
+
     for epub_path in DATA_RAW_DIR.glob("*.epub"):
         filename = normalize(epub_path.stem)
 
@@ -165,38 +169,26 @@ def chat_node(state: State) -> dict:
     raw_query = str(latest_user_message.content).strip()
 
     start = time.perf_counter()
-    classification = intent_llm.invoke([
-        SystemMessage(
-        content=(
-            "Classify the latest user message into exactly one category. "
+    intent = state.get("intent")
 
-            "'book_search': The user wants to find, search for, "
-            "or download a new book from external catalogues. "
+    if intent not in {"book_search", "book_chat", "conversation"}:
+        classification = intent_llm.invoke([
+            SystemMessage(content=(
+                "Classify the latest user message into exactly one category: "
+                "'book_search', 'book_chat', or 'conversation'."
+            )),
+            latest_user_message,
+        ])
+        intent = classification.intent
 
-            "'book_chat': The user wants to discuss a book, ask questions "
-            "about a book, OR list/check books in their local library, "
-            "data/raw folder, or indexed collection. "
-
-            "'conversation': Greetings, general chit-chat, "
-            "or unrelated queries. "
-
-            "IMPORTANT: Requests like 'What books do I have?', "
-            "'Show my library', and 'What books are available locally?' "
-            "must be classified as 'book_chat', NOT 'book_search'."
-
-            "Classify only the latest user message."
-        )
-    ),
-        latest_user_message,
-    ])
-    print(f"[DEBUG] Classified intent: {classification.intent}")
+    print(f"[DEBUG] Classified intent: {intent}")
     print(f"[DEBUG] Active book: {state.get('selected_book')}")
     print(f"[PERF] Intent classification: {round(time.perf_counter() - start, 2)}s")
 
     return {
-        "intent": classification.intent,
+        "intent": intent,
         "raw_query": raw_query,
-        "processing_status": f"intent_classified:{classification.intent}",
+        "processing_status": f"intent_classified:{intent}",
     }
 
 
@@ -636,7 +628,7 @@ async def rag_node(state: State) -> dict:
                         "processing_status": "local_book_not_found",
                     }
 
-                title = epub_path.stem.replace("_", " ").replace("-", " ")
+                title = title_query
 
                 indexed_state = await index_local_epub(epub_path, title)
                 collection_name = indexed_state["collection_name"]
@@ -785,64 +777,167 @@ def build_app(checkpointer=None):
 app = build_app()
 
 
+
 @asynccontextmanager
 async def persistent_app(
-    db_path: Path = Path("data/processed/cadence_memory.db"),
+    db_path: Path = DATA_PROCESSED_DIR / "graphcast_conversations.db",
 ) -> AsyncIterator:
     """Yield an async graph backed by a persistent SQLite checkpointer."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
         yield build_app(checkpointer=checkpointer)
 
 
 # ─── CLI Entry Point ────────────────────────────────────────────────────────
 
+
 async def main() -> None:
-    config = {"configurable": {"thread_id": "cadence-cli"}}
 
-    print("Welcome to Cadence AI. Type 'exit' to quit.")
+    async def run_graph_turn(graph, payload: dict, config: dict) -> dict:
+        result = await graph.ainvoke(payload, config=config)
 
-    async with persistent_app() as persistent_graph:
-        while True:
-            user_text = input("\nYou: ").strip()
-            if user_text.lower() in {"exit", "quit"}:
-                break
-            if not user_text:
-                continue
+        # Handle existing book-selection and download-approval interrupts.
+        while result.get("__interrupt__"):
+            interrupt_value = result["__interrupt__"][0].value
+            print("\n", interrupt_value)
 
-            result = await persistent_graph.ainvoke(
-                {"messages": [HumanMessage(content=user_text)]},
+            if interrupt_value.get("type") == "book_selection":
+                answer = input("Selection: ").strip()
+            elif interrupt_value.get("type") == "download_approval":
+                answer = input("Approve (yes/no): ").strip()
+            else:
+                answer = input("Your response: ").strip()
+
+            result = await graph.ainvoke(
+                Command(resume=answer),
                 config=config,
             )
 
-            # LangGraph interrupts pause execution and return __interrupt__.
-            while result.get("__interrupt__"):
-                interrupt_value = result["__interrupt__"][0].value
-                print("\n", interrupt_value)
+        # Print the latest assistant response.
+        for message in reversed(result.get("messages", [])):
+            if isinstance(message, AIMessage):
+                content = message.content
 
-                if interrupt_value.get("type") == "book_selection":
-                    answer = input("Selection: ").strip()
-                elif interrupt_value.get("type") == "download_approval":
-                    answer = input("Approve (yes/no): ").strip()
-                else:
-                    answer = input("Your response: ").strip()
+                if isinstance(content, list):
+                    content = "".join(
+                        item.get("text", "")
+                        for item in content
+                        if isinstance(item, dict)
+                        and item.get("type") == "text"
+                    )
 
-                result = await persistent_graph.ainvoke(Command(resume=answer), config=config)
+                print(f"\nCadence: {content}")
+                break
 
-            # Print the newest assistant message produced by this turn.
-            for message in reversed(result.get("messages", [])):
-                if isinstance(message, AIMessage):
-                    content = message.content
+        return result
 
-                    if isinstance(content, list):
-                        content = "".join(
-                            item["text"]
-                            for item in content
-                            if isinstance(item, dict) and item.get("type") == "text"
-                        )
+    async with persistent_app() as persistent_graph:
 
-                    print(f"\nCadence: {content}")
+        while True:
+            # Refresh the registered book list every time we return to the menu.
+            books = get_library().list_books()
+
+            print("\n" + "=" * 40)
+            print("             GRAPHCAST")
+            print("=" * 40)
+
+            print("\n1. General Assistant")
+            print("\nYOUR BOOKS")
+
+            for index, book in enumerate(books, start=2):
+                print(f"{index}. {book.title}")
+
+            add_option = len(books) + 2
+            exit_option = len(books) + 3
+
+            print(f"\n{add_option}. Add a Book")
+            print(f"{exit_option}. Exit")
+
+            choice = input("\nSelect a conversation: ").strip()
+
+            if choice == str(exit_option):
+                break
+
+            # Add a new book through the existing search/download workflow.
+            if choice == str(add_option):
+                book_request = input("\nEnter book title/author: ").strip()
+
+                if not book_request:
+                    continue
+
+                config = {
+                    "configurable": {
+                        "thread_id": "cadence-catalog"
+                    }
+                }
+
+                await run_graph_turn(
+                    persistent_graph,
+                    {
+                        "messages": [HumanMessage(content=book_request)],
+                        "intent": "book_search",
+                    },
+                    config,
+                )
+                continue
+
+            # Select the general conversation.
+            if choice == "1":
+                thread_id = "cadence-general"
+                collection_name = None
+                conversation_name = "General Assistant"
+
+            # Select a registered book.
+            elif choice.isdigit() and 2 <= int(choice) < add_option:
+                selected_book = books[int(choice) - 2]
+
+                collection_name = selected_book.collection_name
+                thread_id = f"book_{collection_name}"
+                conversation_name = selected_book.title
+
+            else:
+                print("Invalid selection.")
+                continue
+
+            config = {
+                "configurable": {
+                    "thread_id": thread_id
+                }
+            }
+
+            print(f"\nOpened: {conversation_name}")
+            print("Commands: /switch, /back, /exit")
+
+            # Enter the selected persistent conversation.
+            while True:
+                user_text = input(f"\nYou [{conversation_name}]: ").strip()
+
+                if not user_text:
+                    continue
+
+                if user_text.lower() in {"/switch", "/back"}:
                     break
+
+                if user_text.lower() in {"/exit", "exit", "quit"}:
+                    return
+
+                intent = "book_chat" if collection_name else "conversation"
+
+                payload = {
+                    "messages": [HumanMessage(content=user_text)],
+                    "intent": intent,
+                }
+
+                # Explicitly provide the selected book's RAG collection.
+                if collection_name:
+                    payload["collection_name"] = collection_name
+
+                await run_graph_turn(
+                    persistent_graph,
+                    payload,
+                    config,
+                )
 
 
 if __name__ == "__main__":

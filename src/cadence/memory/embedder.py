@@ -2,7 +2,6 @@
 
 import asyncio
 from typing import List, Union, Dict, Any
-from google import genai
 from chromadb.api.models.Collection import Collection
 from sentence_transformers import SentenceTransformer
 
